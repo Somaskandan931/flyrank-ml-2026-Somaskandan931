@@ -1,1 +1,320 @@
-PASTE-YOUR-DEPLOYED-PAPER-URL-HERE
+WHICH PAGE FIRST? A TWO-SIGNAL PLAYBOOK FOR CONTENT REVIEW PRIORITY
+FlyRank ML Internship — Capstone Research Paper
+
+Key figures: 176,738 content-client pairs scored | 0.882 honest ROC AUC
+(client-held-out) | 9.7% of the queue carries a model score | 60,624 rows
+the playbook refuses to touch
+
+
+================================================================
+1. ABSTRACT
+================================================================
+Content teams cannot manually review every page in a large portfolio, so
+the question this paper asks is: given one month of search and engagement
+data, which pages should a human review first, and why? The method
+rebuilds a whole-month CTR-versus-position-benchmark baseline that needs
+no model, trains a Random Forest on two-week-early features to predict
+two-week-late click volume, validates it under a client-grouped holdout
+so no client's pages appear on both sides of the split, and audits the
+result for label leakage and base-rate distortion before trusting it.
+Crossing the baseline and the honest model score produces six named
+archetypes — from CONFIRMED_PRIORITY, where both signals agree, down to
+LOW_VOLUME_NOISE, which the playbook excludes outright. On the March 2026
+slice, the honest model reaches a Precision@50 of 1.0 and a ROC AUC of
+0.882 against a 0.372 base rate, while a naive random split would have
+overstated generalization by letting 32 clients leak across train and
+test. The result is a ranked queue of 176,738 pages with an action label
+and a plain-language reason for each one, not a black-box score.
+
+
+================================================================
+2. INTRODUCTION
+================================================================
+A content team managing dozens of clients and tens of thousands of pages
+cannot read every analytics dashboard by hand. The practical decision
+this work supports is narrower than "will refreshing this page improve
+rankings" — it is where should a reviewer's limited hour go first this
+week. Getting that wrong has a real cost in both directions: a false
+positive wastes a reviewer's time on a page that was already fine, and a
+false negative lets a genuinely declining page keep losing visibility
+while nobody looks at it.
+
+Two lanes were considered during exploration on a 30,000-page anonymized
+starter sample spanning 32 clients, where 54% of pages already carried a
+declining trend label. That sample confirmed the underlying problem was
+worth solving, but it was set aside once the full warehouse became
+available, because the warehouse's raw daily GSC/GA4 rows support a
+genuinely held-out future window rather than a single static label. The
+final approach combines two independent lanes instead of picking one: a
+CTR/engagement opportunity score that needs no model and covers every
+page, and a refresh/growth model that adds a second, forward-looking
+opinion wherever there is enough held-out evidence to trust it.
+
+
+================================================================
+3. DATA
+================================================================
+The analysis uses fact_content_daily_performance from the FlyRank ML
+internship warehouse, filtered to March 2026. One row is one (content,
+client, date) combination. The month was split into a features window
+and a label window with no shared dates:
+
+  - Early window — March 1-15: source of every feature.
+  - Late window  — March 16-31: source of the label only.
+
+Coverage of March 2026, whole-month scan:
+
+  Slice                          Rows          Share of total
+  ------------------------------ ------------- --------------
+  Total daily rows               9,841,378     100%
+  Rows with GSC data available   3,611,061     36.7%
+  Rows with GA4 data available     413,966      4.2%
+
+This is an unbalanced panel — coverage is not uniform across clients or
+across the month — so GA4-derived features (sessions, scroll events) are
+directionally weaker or missing wherever a row is GSC-only. The final
+development month (June 2026) was never touched; it is the warehouse's
+sealed test window and stays out of scope for this paper. No client
+names, domains, URLs, or raw exports appear anywhere in this paper or
+its outputs, consistent with the internship's public-data rule.
+
+Fields used:
+  Features (early window only): gsc_impressions_early, gsc_clicks_early,
+  gsc_avg_position_early, ga4_sessions_early, scroll_events_early.
+  Label: gsc_clicks_late, converted to a binary "above this month's
+  median" flag.
+  Excluded: whole-month gsc_avg_position (would blend in post-decision
+  data) and any late-window engagement metric (measured in the same
+  period as the label).
+
+
+================================================================
+4. METHODOLOGY
+================================================================
+
+--- Step 1 — The baseline: CTR Recovery Priority ---
+For every (content, client) pair, actual CTR is compared to the average
+CTR of other content in the same position band. When actual CTR falls
+below that band's benchmark, the shortfall — multiplied by impression
+volume — becomes the score, so a large gap on a high-traffic page
+outranks the same gap on a low-traffic page. No future window and no
+product flag enters this calculation; it uses only contemporaneous GSC
+counts.
+
+CTR by position band, whole-month March 2026 (confirms CTR falls as
+position worsens):
+
+  Position band   Impressions      CTR
+  --------------- ---------------- ------
+  1-3             54,028,594       0.38%
+  4-10            137,830,113      0.32%
+  11-20           29,386,006       0.31%
+  21-50           55,944,412       0.14%
+  51+             3,468,464        0.04%
+
+The companion check — whether higher-impression pages under-convert
+more — came back mixed rather than confirmed: the under-100-impression
+tier showed a higher average CTR than the 100-999 tier, which is the
+signature of a small denominator inflating a ratio, not a real pattern.
+That is exactly why the baseline floors out any row under 50 monthly
+impressions before it ever reaches a human.
+
+--- Step 2 — The model, and why a random split lies ---
+A Random Forest is trained on the five early-window features to predict
+label_high_clicks_late. Reporting this honestly required comparing two
+splits on the identical data, model, and features:
+
+  Split                    Clients shared  Precision@50  ROC AUC  Avg. precision
+  ------------------------ --------------- ------------- -------- ---------------
+  Naive random (no group.) 32              1.000         0.877    0.846
+  Client-grouped (honest)  0               1.000         0.882    0.832
+
+The gap is smaller than a worst case would suggest here, but the naive
+split let 32 of 33 clients place pages on both sides of train/test — a
+real risk of the model partly memorizing client-level character rather
+than generalizing. Only the grouped number is reported anywhere
+downstream.
+
+--- Step 3 — Leakage audit on the shipped features ---
+Train-with / train-without test on the honest split, Random Forest ROC
+AUC:
+
+  Feature set                        ROC AUC   Drop vs. full
+  ----------------------------------- --------- --------------
+  All five features                   0.882     —
+  Without gsc_impressions_early       0.843     -0.039
+  Without gsc_clicks_early            0.870     -0.012
+  Without gsc_avg_position_early      0.874     -0.008
+  Without ga4_sessions_early          0.881     -0.000
+  Without scroll_events_early         0.883     +0.001
+
+No single feature carries a near-1.0 score on its own, and every feature
+comes from a time window that ends before the label window begins — the
+confession pattern a genuinely leaked feature would show is absent here.
+
+--- Step 4 — Combining both signals into the queue ---
+The two signals are crossed into six archetypes. The model's score is
+applied only to rows that actually fell in the client-grouped holdout —
+applying it to its own training rows would reuse memorized information
+as if it were a prediction, which is exactly the mistake the split audit
+exists to catch.
+
+
+================================================================
+5. RESULTS
+================================================================
+Five model families were compared on the same honest, client-grouped
+split before Random Forest was selected for the queue:
+
+  Method                              Precision@50  ROC AUC  Avg. precision
+  ----------------------------------- ------------- -------- ---------------
+  Baseline CTR-recovery only (Wk 4)   0.94           0.567    0.554
+  Logistic regression                 1.00           0.871    0.825
+  Decision tree                       0.94           0.877    0.817
+  Random Forest (shipped)             1.00           0.882    0.832
+  Gradient boosting                   1.00           0.884    0.834
+
+Gradient boosting edges out Random Forest by a hair on this split;
+Random Forest was carried forward into the playbook for its more stable
+behavior across the leakage audit's feature-removal tests. The baseline
+alone — no model, no held-out data required — already clears a 0.94
+Precision@50 against a 0.372 base rate, which is why it remains the
+layer that covers every page rather than only the 9.7% with a model
+score.
+
+The ranked queue, by archetype:
+
+  Archetype                       Count     Share
+  -------------------------------- --------- -------
+  BASELINE_ONLY_NO_MODEL_SCORE     73,015    41.3%
+  LOW_VOLUME_NOISE                 60,624    34.3%
+  HEALTHY_OR_MONITOR               30,212    17.1%
+  BASELINE_ONLY_LOW_CONFIDENCE      6,469     3.7%
+  CONFIRMED_PRIORITY                3,501     2.0%
+  MODEL_ONLY_WATCH                  2,917     1.7%
+
+
+================================================================
+6. LIMITATIONS & HONEST FRAMING
+================================================================
+What this paper CAN say: the model's score is an observed, out-of-sample
+ranking signal on one month of one warehouse slice. It is decision
+support for where a reviewer should look first — not proof that
+reviewing a page will increase its clicks, and not a claim about
+Google's ranking algorithm.
+
+What it CANNOT say: that any specific page will grow, that a title/meta
+edit causes a click increase, or that this ranking holds outside March
+2026 without re-validation.
+
+  - Coverage. Only 36.7% of March rows have GSC data and 4.2% have GA4
+    data; roughly a third of clients have little or no usable history
+    and fall back to baseline-only treatment entirely.
+  - One month, one split. The model was trained and honestly evaluated
+    on a single early/late split inside March 2026. It says nothing
+    about April, about seasonality, or about a client whose reporting
+    starts later.
+  - The label is a relative proxy. "High clicks late" means late-window
+    clicks exceeded this dataset's own median — a portfolio-relative
+    definition, not an external growth or revenue outcome.
+  - Small-sample noise. 44,242 baseline-flagged rows sit under 50
+    monthly impressions, where a handful of clicks can swing a CTR
+    ratio dramatically; this is exactly why LOW_VOLUME_NOISE is
+    excluded outright rather than merely down-weighted.
+  - Confidence, not certainty. A model score is an honest probability
+    from a grouped holdout, not a guarantee — the only numbers that
+    describe how good the ranking actually is are the Precision@50,
+    ROC AUC, and base rate reported above, and they should be
+    re-checked whenever the portfolio or month changes.
+
+
+================================================================
+7. RANKED RECOMMENDATIONS
+================================================================
+Six archetypes, each with one action and one reason a human can check in
+seconds. Priority rank follows the order below; LOW_VOLUME_NOISE never
+enters the ranking at all.
+
+CONFIRMED PRIORITY — Review title & meta (do first)
+  Baseline flags the CTR gap AND the held-out model independently scores
+  it >=0.5. Two signals agree, and the fix is cheap relative to the
+  impression volume already flowing to the page. 3,501 pages, 2.0%.
+
+MODEL-ONLY WATCH — Investigate momentum
+  The page isn't broken by today's CTR standard, but the model sees
+  rising momentum. Lower urgency, higher upside — worth expanding before
+  it plateaus. 2,917 pages, 1.7%.
+
+BASELINE-ONLY, NO MODEL SCORE — Review title & meta (baseline confidence)
+  The baseline flags it, but the page fell outside the held-out sample,
+  so there's no second opinion. Still actionable — kept separate from
+  Confirmed Priority on purpose, because it's a single-signal call.
+  73,015 pages, 41.3%.
+
+BASELINE-ONLY, LOW CONFIDENCE — Low-priority review
+  The baseline flags it, but the held-out model disagrees. The two
+  signals disagree — worth a look, not worth doing first. 6,469 pages,
+  3.7%.
+
+HEALTHY OR MONITOR — Monitor
+  Neither signal flags the page. No action, revisit next cycle. 30,212
+  pages, 17.1%.
+
+LOW-VOLUME NOISE — Exclude (insufficient data)
+  Fewer than 50 monthly impressions. A handful of impressions can fake a
+  large relative CTR gap; this tier is never acted on regardless of
+  score. 60,624 pages, 34.3%.
+
+What a human checks before acting:
+Before touching any Confirmed Priority, Baseline-Only, or Model-Only
+Watch row: is a title/meta change already in flight that this month's
+average hasn't caught up to yet? Is the impression volume real search
+intent, or a low-relevance query mix inflating the count? Is the page
+seasonal, legal, medical, or otherwise brand-sensitive, where a template
+edit needs a specialist instead?
+
+The no-go list:
+The queue never auto-publishes or auto-applies anything — every row is a
+recommendation to review, not an edit to execute. model_score is never
+treated as ground truth on its own, a FlyRank-style composite or
+workflow label never feeds back in as a re-scoring input, and the
+pipeline is never silently extended to a client or month it wasn't
+re-validated on.
+
+Monitoring — when this playbook goes stale (reference values, March
+2026):
+
+  Signal                            Reference value   Retrain if
+  ---------------------------------- ----------------- --------------------------
+  Precision@50 (honest split)        1.000             Falls >20% relative
+  Label base rate                    0.372             Drifts >10 points
+  Benchmark CTR (any position band)  see table above   Moves >20% relative
+  Portfolio coverage (GSC available) 36.7%             Shifts sharply MoM
+
+
+================================================================
+8. REPRODUCIBILITY
+================================================================
+Every step above traces to a notebook committed under work/notebooks/ in
+the project repository: a research-question framing pass, an ML-task
+framing pass, a data contract with a deliberately injected and then
+removed label leak, a baseline CTR-recovery score with a top-10 manual
+review, a first honest model with a naive-vs-grouped leakage
+demonstration, a validation and research-claim audit against FlyRank's
+own published findings, and the action-playbook notebook that produced
+the queue above. The full ranked queue (w07_action_queue.csv, 176,738
+rows) is regenerated on every run and intentionally excluded from
+version control; the aggregate counts and monitoring reference values in
+w07_playbook_metrics.json are committed and are the receipt every number
+on this page traces back to.
+
+
+================================================================
+ACKNOWLEDGMENTS & DATA CREDIT
+================================================================
+Built on the FlyRank ML Internship dataset. Data courtesy of FlyRank
+(https://flyrank.ai).
+
+No client names, domains, URLs, credentials, or raw exports appear in
+this paper. All figures are aggregate counts or ratios computed from the
+internship warehouse's March 2026 slice.
